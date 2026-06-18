@@ -3,6 +3,7 @@ using Microsoft.OpenApi.Models;
 using Pedidos.Api.Data;
 using Pedidos.Api.Services;
 using System.Text.Json.Serialization;
+using System.Reflection;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -11,6 +12,10 @@ builder.Services.AddControllers()
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen(options =>
 {
+    var xmlFile = $"{Assembly.GetExecutingAssembly().GetName().Name}.xml";
+    var xmlPath = Path.Combine(AppContext.BaseDirectory, xmlFile);
+
+    options.IncludeXmlComments(xmlPath);
     options.SwaggerDoc("v1", new OpenApiInfo
     {
         Title = "API de Gestão de Pedidos",
