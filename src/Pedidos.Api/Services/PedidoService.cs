@@ -86,13 +86,26 @@ public sealed class PedidoService(AppDbContext db)
         return new PagedResult<PedidoResponse>(pedidos.Select(PedidoResponse.FromEntity).ToList(), page, pageSize, total);
     }
 
-    public async Task<ServiceResult<PedidoResponse>> AlterarStatusAsync(Guid id, AlterarStatusPedidoRequest request, CancellationToken ct)
+    public async Task<ServiceResult<PedidoResponse>> AlterarStatusAsync(
+        Guid id,
+        AlterarStatusPedidoRequest request,
+        CancellationToken ct)
     {
         await using var transaction = await db.Database.BeginTransactionAsync(ct);
-        var pedido = await db.Pedidos.Include(x => x.Itens).ThenInclude(x => x.Produto).Include(x => x.HistoricoStatus).FirstOrDefaultAsync(x => x.Id == id, ct);
-        if (pedido is null) return ServiceResult<PedidoResponse>.Fail("Pedido não encontrado.");
-        if (pedido.Status == request.NovoStatus) return ServiceResult<PedidoResponse>.Fail("O novo status é igual ao status atual. Nenhum histórico foi gerado.");
-        if (!IsTransicaoPermitida(pedido.Status, request.NovoStatus)) return ServiceResult<PedidoResponse>.Fail($"Transição de status inválida: {pedido.Status} -> {request.NovoStatus}.");
+
+        var pedido = await db.Pedidos
+            .AsNoTracking()
+            .Include(x => x.Itens)
+            .FirstOrDefaultAsync(x => x.Id == id, ct);
+
+        if (pedido is null)
+            return ServiceResult<PedidoResponse>.Fail("Pedido não encontrado.");
+
+        if (pedido.Status == request.NovoStatus)
+            return ServiceResult<PedidoResponse>.Fail("O novo status é igual ao status atual. Nenhum histórico foi gerado.");
+
+        if (!IsTransicaoPermitida(pedido.Status, request.NovoStatus))
+            return ServiceResult<PedidoResponse>.Fail($"Transição de status inválida: {pedido.Status} -> {request.NovoStatus}.");
 
         var now = DateTimeHelper.NowUtc();
         var statusAnterior = pedido.Status;
@@ -101,15 +114,31 @@ public sealed class PedidoService(AppDbContext db)
         {
             foreach (var item in pedido.Itens)
             {
-                item.Produto.EstoqueDisponivel += item.Quantidade;
-                item.Produto.AtualizadoEmUtc = now;
+                var produtoAtualizado = await db.Produtos
+                    .Where(x => x.Id == item.ProdutoId)
+                    .ExecuteUpdateAsync(setters => setters
+                        .SetProperty(x => x.EstoqueDisponivel, x => x.EstoqueDisponivel + item.Quantidade)
+                        .SetProperty(x => x.AtualizadoEmUtc, now),
+                        ct);
+
+                if (produtoAtualizado == 0)
+                    return ServiceResult<PedidoResponse>.Fail($"Produto {item.ProdutoId} não encontrado para retorno de estoque.");
             }
         }
 
-        pedido.Status = request.NovoStatus;
-        pedido.AtualizadoEmUtc = now;
-        pedido.HistoricoStatus.Add(new PedidoStatusHistorico
+        var pedidoAtualizado = await db.Pedidos
+            .Where(x => x.Id == id)
+            .ExecuteUpdateAsync(setters => setters
+                .SetProperty(x => x.Status, request.NovoStatus)
+                .SetProperty(x => x.AtualizadoEmUtc, now),
+                ct);
+
+        if (pedidoAtualizado == 0)
+            return ServiceResult<PedidoResponse>.Fail("Pedido não encontrado para alteração de status.");
+
+        db.PedidoStatusHistoricos.Add(new PedidoStatusHistorico
         {
+            PedidoId = id,
             StatusAnterior = statusAnterior,
             NovoStatus = request.NovoStatus,
             AlteradoEmUtc = now,
@@ -118,7 +147,10 @@ public sealed class PedidoService(AppDbContext db)
 
         await db.SaveChangesAsync(ct);
         await transaction.CommitAsync(ct);
-        return ServiceResult<PedidoResponse>.Ok(await ObterPedidoResponseAsync(id, ct) ?? PedidoResponse.FromEntity(pedido));
+
+        return ServiceResult<PedidoResponse>.Ok(
+            await ObterPedidoResponseAsync(id, ct)
+        );
     }
 
     private static bool IsTransicaoPermitida(PedidoStatus atual, PedidoStatus novo) => (atual, novo) switch
